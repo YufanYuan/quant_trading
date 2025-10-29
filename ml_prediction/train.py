@@ -15,7 +15,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from model import TransformerClassifier
-from hdf5_dataloader import create_train_dataloader, create_val_dataloader
+from hdf5_dataloader import create_dataloader
 
 
 class Trainer:
@@ -174,8 +174,8 @@ class Trainer:
 
     def train(
         self,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
+        loader: DataLoader,
+        dataset,
         num_epochs: int = 50,
         steps_per_epoch: int = 1000,
         val_steps_per_epoch: int = 200,
@@ -196,14 +196,16 @@ class Trainer:
 
         for epoch in range(num_epochs):
             # 训练
+            dataset.set_mode('train')
             train_loss, global_step = self.train_epoch(
-                train_loader, epoch + 1, num_epochs, steps_per_epoch, global_step
+                loader, epoch + 1, num_epochs, steps_per_epoch, global_step
             )
             self.train_losses.append(train_loss)
 
             # 验证
+            dataset.set_mode('val')
             val_loss, val_accuracy, class_metrics = self.validate(
-                val_loader, val_steps_per_epoch
+                loader, val_steps_per_epoch
             )
             self.val_losses.append(val_loss)
             self.val_accuracies.append(val_accuracy)
@@ -291,16 +293,15 @@ def main():
         "model_type": "transformer",
         "h5_path": "./data/all_data.h5",
         "datasets": None,  # None表示使用所有datasets，也可以指定列表
-        "val_ratio": 0.2,  # 从每个dataset的末尾取20%作为验证集
+        "val_ratio": 0.2,  # 验证集比例
         "batch_size": 256,
-        "segments_per_batch": 8,
         "num_epochs": 100,
         "steps_per_epoch": 1000,
         "val_steps_per_epoch": 200,
         "learning_rate": 0.0001,
         "weight_decay": 1e-5,
         "early_stopping_patience": 15,
-        "num_workers": 2,
+        "num_workers": 0,  # Windows上建议使用0，避免多进程问题
         "transformer_config": {
             "d_model": 128,
             "nhead": 8,
@@ -321,38 +322,25 @@ def main():
         print("请先运行 data_loader.py 生成数据")
         return
 
-    # 创建训练和验证DataLoader
+    # 创建DataLoader
     print(f"\n创建DataLoader...")
     print(f"  使用datasets: {config['datasets'] if config['datasets'] else '全部'}")
     print(f"  验证集比例: {config['val_ratio']:.1%}")
     print(f"  Batch size: {config['batch_size']}")
-    print(f"  Segments per batch: {config['segments_per_batch']}")
+    print(f"  Num workers: {config['num_workers']}")
 
-    train_loader = create_train_dataloader(
+    loader, dataset = create_dataloader(
         h5_path=str(h5_path),
         dataset_names=config["datasets"],
         batch_size=config["batch_size"],
-        segments_per_batch=config["segments_per_batch"],
         val_ratio=config["val_ratio"],
         num_workers=config["num_workers"],
-        seed=42,
-    )
-
-    print()  # 空行分隔
-
-    val_loader = create_val_dataloader(
-        h5_path=str(h5_path),
-        dataset_names=config["datasets"],
-        batch_size=config["batch_size"],
-        segments_per_batch=config["segments_per_batch"],
-        val_ratio=config["val_ratio"],
-        num_workers=config["num_workers"],
-        seed=123,
     )
 
     # 获取特征维度（从第一个batch取样本）
     print(f"\n获取数据维度...")
-    sample_features, _ = next(iter(train_loader))
+    dataset.set_mode('train')
+    sample_features, _ = next(iter(loader))
     input_size = sample_features.shape[-1]
     seq_len = sample_features.shape[1]
 
@@ -377,8 +365,8 @@ def main():
 
     # 训练
     trainer.train(
-        train_loader,
-        val_loader,
+        loader,
+        dataset,
         num_epochs=config["num_epochs"],
         steps_per_epoch=config["steps_per_epoch"],
         val_steps_per_epoch=config["val_steps_per_epoch"],

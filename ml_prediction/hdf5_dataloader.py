@@ -40,7 +40,7 @@ class HDF5Dataset(IterableDataset):
         self.h5_path = Path(h5_path)
         self.batch_size = batch_size
         self.val_ratio = val_ratio
-        self._mode = 'train'
+        self._mode = "train"
 
         if not self.h5_path.exists():
             raise FileNotFoundError(f"HDF5文件不存在: {self.h5_path}")
@@ -58,12 +58,13 @@ class HDF5Dataset(IterableDataset):
                     raise ValueError(f"以下datasets不存在: {missing}")
                 self.dataset_names = dataset_names
 
-            # 收集所有样本的全局索引：(dataset_name, local_index)
+            # 收集所有样本的全局索引：(dataset_idx, local_index)
+            # 使用整数索引代替字符串，节省内存
             all_samples = []
-            for name in self.dataset_names:
+            for dataset_idx, name in enumerate(self.dataset_names):
                 total_len = len(f[name])
                 # 使用列表推导式，比循环append快得多
-                all_samples.extend([(name, idx) for idx in range(total_len)])
+                all_samples.extend([(dataset_idx, idx) for idx in range(total_len)])
 
             # 使用固定种子shuffle并划分
             rng = np.random.default_rng(42)
@@ -75,7 +76,9 @@ class HDF5Dataset(IterableDataset):
 
             # 读取metadata
             self.window_size = f.attrs.get("window_size", 120)
-            self.num_features = len(f.attrs.get("feature_names", "").split(",")) - 1  # 最后一个是label
+            self.num_features = (
+                len(f.attrs.get("feature_names", "").split(",")) - 1
+            )  # 最后一个是label
 
         print(f"HDF5Dataset初始化:")
         print(f"  文件: {self.h5_path}")
@@ -86,7 +89,7 @@ class HDF5Dataset(IterableDataset):
 
     def set_mode(self, mode: str):
         """切换训练/验证模式"""
-        if mode not in ['train', 'val']:
+        if mode not in ["train", "val"]:
             raise ValueError(f"mode必须是'train'或'val'，当前为: {mode}")
         self._mode = mode
 
@@ -104,36 +107,47 @@ class HDF5Dataset(IterableDataset):
             labels: (batch_size,)
         """
         # 选择样本列表
-        samples = self.train_samples if self._mode == 'train' else self.val_samples
+        samples = self.train_samples if self._mode == "train" else self.val_samples
 
         # 处理多worker情况
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             per_worker = len(samples) // worker_info.num_workers
             start = worker_info.id * per_worker
-            end = start + per_worker if worker_info.id < worker_info.num_workers - 1 else len(samples)
+            end = (
+                start + per_worker
+                if worker_info.id < worker_info.num_workers - 1
+                else len(samples)
+            )
             samples = samples[start:end]
 
         # 打开HDF5并顺序遍历
         with h5py.File(self.h5_path, "r") as f:
             for batch_start in range(0, len(samples), self.batch_size):
-                batch_samples = samples[batch_start:batch_start + self.batch_size]
+                batch_samples = samples[batch_start : batch_start + self.batch_size]
 
                 # 读取batch
                 batch_data = []
-                for dataset_name, idx in batch_samples:
+                for dataset_idx, idx in batch_samples:
+                    dataset_name = self.dataset_names[dataset_idx]
                     batch_data.append(f[dataset_name][idx])
 
-                batch_data = np.array(batch_data)  # (batch_size, window_size, num_features+1)
+                batch_data = np.array(
+                    batch_data
+                )  # (batch_size, window_size, num_features+1)
 
-                features = torch.from_numpy(batch_data[:, :, :-1])  # (batch_size, window_size, num_features)
+                features = torch.from_numpy(
+                    batch_data[:, :, :-1]
+                )  # (batch_size, window_size, num_features)
                 labels = torch.from_numpy(batch_data[:, 0, -1]).long()  # (batch_size,)
 
                 yield features, labels
 
     def __len__(self):
         """返回一个epoch的batch数量"""
-        n_samples = len(self.train_samples) if self._mode == 'train' else len(self.val_samples)
+        n_samples = (
+            len(self.train_samples) if self._mode == "train" else len(self.val_samples)
+        )
         return (n_samples + self.batch_size - 1) // self.batch_size
 
 
@@ -172,7 +186,7 @@ def create_dataloader(
                 validate(features, labels)
     """
     dataset = HDF5Dataset(h5_path, dataset_names, batch_size, val_ratio)
-    dataset.set_mode('train')
+    dataset.set_mode("train")
 
     loader = DataLoader(
         dataset,
@@ -186,11 +200,11 @@ def create_dataloader(
 
 def test_dataloader():
     """测试"""
-    print("="*60)
+    print("=" * 60)
     print("测试HDF5Dataset")
-    print("="*60)
+    print("=" * 60)
 
-    h5_path = './data/test_data.h5'
+    h5_path = "./data/test_data.h5"
     if not Path(h5_path).exists():
         print(f"错误: {h5_path} 不存在")
         return
@@ -199,7 +213,7 @@ def test_dataloader():
 
     # 测试多个epoch
     print("\n训练模式 - 2个epoch:")
-    dataset.set_mode('train')
+    dataset.set_mode("train")
     for epoch in range(2):
         count = 0
         for features, labels in loader:
@@ -210,7 +224,7 @@ def test_dataloader():
 
     # 测试验证
     print("\n验证模式:")
-    dataset.set_mode('val')
+    dataset.set_mode("val")
     count = 0
     for features, labels in loader:
         count += 1
@@ -218,8 +232,8 @@ def test_dataloader():
             print(f"  Batch 1: {features.shape}")
     print(f"  完成: {count} batches")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_dataloader()
