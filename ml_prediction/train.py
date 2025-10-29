@@ -1,5 +1,5 @@
 """
-使用HDF5数据集的模型训练脚本
+使用Sharded HDF5数据集的模型训练脚本（Batch-Aligned版本）
 """
 
 import torch
@@ -15,7 +15,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from model import TransformerClassifier
-from hdf5_dataloader import create_dataloader
+from sharded_hdf5_dataloader import create_sharded_dataloader
 
 
 class Trainer:
@@ -62,7 +62,7 @@ class Trainer:
         train_loader: DataLoader,
         epoch: int = 0,
         num_epochs: int = 0,
-        steps_per_epoch: int = 1000,
+        steps_per_epoch: Optional[int] = None,
         global_step: int = 0,
     ) -> Tuple[float, int]:
         """训练一个epoch"""
@@ -70,12 +70,15 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
 
+        # 如果没有指定steps_per_epoch，就用整个dataloader
+        max_steps = steps_per_epoch if steps_per_epoch else len(train_loader)
+
         # 创建进度条
         desc = f"Epoch {epoch}/{num_epochs}" if num_epochs > 0 else "Training"
-        pbar = tqdm(total=steps_per_epoch, desc=desc, leave=False)
+        pbar = tqdm(total=max_steps, desc=desc, leave=False)
 
         for step, (features, labels) in enumerate(train_loader):
-            if step >= steps_per_epoch:
+            if steps_per_epoch and step >= steps_per_epoch:
                 break
 
             features = features.to(self.device)
@@ -110,7 +113,7 @@ class Trainer:
         return avg_loss, global_step
 
     def validate(
-        self, val_loader: DataLoader, steps_per_epoch: int = 200
+        self, val_loader: DataLoader, steps_per_epoch: Optional[int] = None
     ) -> Tuple[float, float, Dict]:
         """验证"""
         self.model.eval()
@@ -123,12 +126,15 @@ class Trainer:
         all_preds = []
         all_labels = []
 
+        # 如果没有指定steps_per_epoch，就用整个dataloader
+        max_steps = steps_per_epoch if steps_per_epoch else len(val_loader)
+
         # 创建验证进度条
-        pbar = tqdm(total=steps_per_epoch, desc="Validating", leave=False)
+        pbar = tqdm(total=max_steps, desc="Validating", leave=False)
 
         with torch.no_grad():
             for step, (features, labels) in enumerate(val_loader):
-                if step >= steps_per_epoch:
+                if steps_per_epoch and step >= steps_per_epoch:
                     break
 
                 features = features.to(self.device)
@@ -174,11 +180,12 @@ class Trainer:
 
     def train(
         self,
-        loader: DataLoader,
-        dataset,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        train_dataset,
         num_epochs: int = 50,
-        steps_per_epoch: int = 1000,
-        val_steps_per_epoch: int = 200,
+        steps_per_epoch: Optional[int] = None,
+        val_steps_per_epoch: Optional[int] = None,
         early_stopping_patience: int = 10,
         checkpoint_dir: str = "./checkpoints",
     ):
@@ -196,16 +203,17 @@ class Trainer:
 
         for epoch in range(num_epochs):
             # 训练
-            dataset.set_mode('train')
             train_loss, global_step = self.train_epoch(
-                loader, epoch + 1, num_epochs, steps_per_epoch, global_step
+                train_loader, epoch + 1, num_epochs, steps_per_epoch, global_step
             )
             self.train_losses.append(train_loss)
 
+            # Epoch结束，重新shuffle训练数据
+            train_dataset.on_epoch_end()
+
             # 验证
-            dataset.set_mode('val')
             val_loss, val_accuracy, class_metrics = self.validate(
-                loader, val_steps_per_epoch
+                val_loader, val_steps_per_epoch
             )
             self.val_losses.append(val_loss)
             self.val_accuracies.append(val_accuracy)
@@ -291,17 +299,17 @@ def main():
     # 配置
     config = {
         "model_type": "transformer",
-        "h5_path": "./data/all_data.h5",
-        "datasets": None,  # None表示使用所有datasets，也可以指定列表
+        "shard_dir": "./data/sharded",  # 分片数据目录
+        "batch_size": 512,  # 必须与数据对齐值一致
         "val_ratio": 0.2,  # 验证集比例
-        "batch_size": 256,
         "num_epochs": 100,
-        "steps_per_epoch": 1000,
-        "val_steps_per_epoch": 200,
+        "steps_per_epoch": None,  # None表示使用全部数据
+        "val_steps_per_epoch": None,  # None表示使用全部验证数据
         "learning_rate": 0.0001,
         "weight_decay": 1e-5,
         "early_stopping_patience": 15,
-        "num_workers": 0,  # Windows上建议使用0，避免多进程问题
+        "num_workers": 4,  # 可以使用多worker
+        "shuffle_on_epoch": True,  # 每个epoch后重新shuffle
         "transformer_config": {
             "d_model": 128,
             "nhead": 8,
@@ -312,40 +320,48 @@ def main():
     }
 
     print("=" * 60)
-    print("使用HDF5数据集训练模型")
+    print("使用Sharded HDF5数据集训练模型 (Batch-Aligned)")
     print("=" * 60)
 
-    # 检查数据文件
-    h5_path = Path(config["h5_path"])
-    if not h5_path.exists():
-        print(f"错误: 找不到HDF5文件 {h5_path}")
-        print("请先运行 data_loader.py 生成数据")
+    # 检查数据目录
+    shard_dir = Path(config["shard_dir"])
+    if not shard_dir.exists():
+        print(f"错误: 找不到分片数据目录 {shard_dir}")
+        print("请先运行 reshard_hdf5.py 生成分片数据")
         return
 
     # 创建DataLoader
     print(f"\n创建DataLoader...")
-    print(f"  使用datasets: {config['datasets'] if config['datasets'] else '全部'}")
+    print(f"  分片目录: {config['shard_dir']}")
     print(f"  验证集比例: {config['val_ratio']:.1%}")
     print(f"  Batch size: {config['batch_size']}")
     print(f"  Num workers: {config['num_workers']}")
+    print(f"  Epoch shuffle: {config['shuffle_on_epoch']}")
 
-    loader, dataset = create_dataloader(
-        h5_path=str(h5_path),
-        dataset_names=config["datasets"],
+    train_loader, val_loader, train_dataset, val_dataset = create_sharded_dataloader(
+        shard_dir=str(shard_dir),
         batch_size=config["batch_size"],
         val_ratio=config["val_ratio"],
         num_workers=config["num_workers"],
+        shuffle_on_epoch=config["shuffle_on_epoch"],
     )
 
     # 获取特征维度（从第一个batch取样本）
     print(f"\n获取数据维度...")
-    dataset.set_mode('train')
-    sample_features, _ = next(iter(loader))
+    sample_features, _ = next(iter(train_loader))
     input_size = sample_features.shape[-1]
     seq_len = sample_features.shape[1]
 
     print(f"  输入特征数: {input_size}")
     print(f"  序列长度: {seq_len}")
+    print(f"  实际batch大小: {sample_features.shape[0]}")
+
+    # 打印统计信息
+    stats = train_dataset.get_shard_stats()
+    print(f"\n数据集统计:")
+    print(f"  总样本数: {stats['total_samples']:,}")
+    print(f"  总batch数: {stats['total_batches']:,}")
+    print(f"  训练集batch数: {len(train_dataset):,}")
 
     # 创建模型
     print(f"\n创建{config['model_type']}模型...")
@@ -353,7 +369,7 @@ def main():
 
     # 创建 TensorBoard 日志目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tensorboard_dir = f'./runs/{config["model_type"]}_{timestamp}'
+    tensorboard_dir = f'./runs/{config["model_type"]}_sharded_{timestamp}'
 
     # 创建训练器
     trainer = Trainer(
@@ -365,8 +381,9 @@ def main():
 
     # 训练
     trainer.train(
-        loader,
-        dataset,
+        train_loader,
+        val_loader,
+        train_dataset,
         num_epochs=config["num_epochs"],
         steps_per_epoch=config["steps_per_epoch"],
         val_steps_per_epoch=config["val_steps_per_epoch"],
@@ -377,7 +394,7 @@ def main():
     config["timestamp"] = datetime.now().isoformat()
     config["input_size"] = int(input_size)
     config["seq_len"] = int(seq_len)
-    config["h5_path"] = str(h5_path)
+    config["shard_dir"] = str(shard_dir)
 
     config_path = Path("./checkpoints/model_config.json")
     config_path.parent.mkdir(parents=True, exist_ok=True)
