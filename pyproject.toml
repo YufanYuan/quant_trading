@@ -7,9 +7,14 @@ requires-python = ">=3.13"
 dependencies = [
     "backtrader[plotting]>=1.9.78.123",
     "matplotlib>=3.10.5",
+    "numpy>=2.0.0",
     "pandas>=2.3.1",
+    "pandas-stubs==2.3.0.250703",
     "pytz>=2025.2",
     "requests>=2.32.4",
+    "tensorboard>=2.20.0",
+    "torch>=2.0.0",
+    "tqdm>=4.67.1",
 ]
 
 [tool.pyright]
