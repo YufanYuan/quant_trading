@@ -15,7 +15,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 from model import TransformerClassifier
-from sharded_hdf5_dataloader import create_sharded_dataloader
+from datasets import create_sharded_dataloader
 
 
 class Trainer:
