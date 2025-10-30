@@ -28,6 +28,7 @@ class Trainer:
         learning_rate: float = 0.001,
         weight_decay: float = 1e-5,
         tensorboard_dir: Optional[str] = None,
+        class_weights: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -36,15 +37,22 @@ class Trainer:
             learning_rate: 学习率
             weight_decay: L2正则化系数
             tensorboard_dir: TensorBoard 日志目录
+            class_weights: 类别权重（用于处理类别不平衡）
         """
         self.model = model.to(device)
         self.device = device
-        self.criterion = nn.CrossEntropyLoss()
+
+        # 使用类别权重处理不平衡问题
+        if class_weights is not None:
+            class_weights = class_weights.to(device)
+            print(f"使用类别权重: {class_weights.cpu().numpy()}")
+
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
         self.optimizer = optim.Adam(
             self.model.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=5
+            self.optimizer, mode="min", factor=0.5, patience=20
         )
 
         self.train_losses = []
@@ -300,14 +308,14 @@ def main():
     config = {
         "model_type": "transformer",
         "shard_dir": "./data/sharded",  # 分片数据目录
-        "batch_size": 512,  # 必须与数据对齐值一致
+        "batch_size": 16,  # 必须与数据对齐值一致
         "val_ratio": 0.2,  # 验证集比例
-        "num_epochs": 100,
+        "num_epochs": 1000,
         "steps_per_epoch": None,  # None表示使用全部数据
         "val_steps_per_epoch": None,  # None表示使用全部验证数据
-        "learning_rate": 0.0001,
+        "learning_rate": 0.01,  # 提高学习率，从0.0001改为0.001
         "weight_decay": 1e-5,
-        "early_stopping_patience": 15,
+        "early_stopping_patience": 1e15,
         "num_workers": 4,  # 可以使用多worker
         "shuffle_on_epoch": True,  # 每个epoch后重新shuffle
         "transformer_config": {
@@ -315,7 +323,7 @@ def main():
             "nhead": 8,
             "num_layers": 3,
             "dim_feedforward": 512,
-            "dropout": 0.3,
+            "dropout": 0.1,  # 降低dropout，从0.3改为0.1
         },
     }
 
@@ -363,20 +371,46 @@ def main():
     print(f"  总batch数: {stats['total_batches']:,}")
     print(f"  训练集batch数: {len(train_dataset):,}")
 
+    # 计算类别权重（用于处理类别不平衡）
+    print(f"\n计算类别权重...")
+    print(f"  正在扫描训练集标签分布...")
+
+    # 统计训练集的类别分布
+    class_counts = torch.zeros(3, dtype=torch.long)
+    num_samples_to_check = min(10, len(train_loader))  # 只检查前10个batch来估计
+
+    for i, (_, labels) in enumerate(train_loader):
+        if i >= num_samples_to_check:
+            break
+        for label in range(3):
+            class_counts[label] += (labels == label).sum()
+
+    # 计算权重（使用inverse frequency）
+    total_samples = class_counts.sum().float()
+    class_weights = total_samples / (3.0 * class_counts.float())
+
+    print(f"  类别样本数: {class_counts.numpy()}")
+    print(f"  类别权重: {class_weights.numpy()}")
+
     # 创建模型
     print(f"\n创建{config['model_type']}模型...")
-    model = TransformerClassifier(input_size=input_size, **config["transformer_config"])
+    model = TransformerClassifier(
+        input_size=input_size,
+        seq_len=seq_len,
+        **config["transformer_config"]
+    )
 
     # 创建 TensorBoard 日志目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tensorboard_dir = f'./runs/{config["model_type"]}_sharded_{timestamp}'
 
-    # 创建训练器
+    # 创建训练器（使用类别权重）
     trainer = Trainer(
         model,
         learning_rate=config["learning_rate"],
         weight_decay=config["weight_decay"],
         tensorboard_dir=tensorboard_dir,
+        class_weights=class_weights,
     )
 
     # 训练
